@@ -48,14 +48,15 @@ class ActionNormalizer():
 
 class OutputParser2(DeviceParams):  
     
-    def __init__(self, CktGraph):
+    def __init__(self, CktGraph, UniquePath):
         self.ckt_hierarchy = CktGraph.ckt_hierarchy 
         self.op = CktGraph.op
+        self.path = UniquePath
         super().__init__(self.ckt_hierarchy)       
 
     def ac(self, file_name):
         try:
-            AMP_NMCF_ac = open(f'{SPICE_NETLIST_DIR}/{file_name}', 'r')  
+            AMP_NMCF_ac = open(f'{self.path}/{file_name}', 'r')  
             lines_ac = AMP_NMCF_ac.readlines()     
             freq = []                       
             cmrrdc_ac = []
@@ -73,11 +74,11 @@ class OutputParser2(DeviceParams):
                 
             return freq, cmrrdc_ac, PSRP_ac, PSRN_ac, dcgain_ac
         except:
-            print("Simulation errors, no .AC simulation results.")
+            print("ac simulation errors, no .AC simulation results.")
 
     def GBW_PM(self, file_name):
         try:
-            AMP_NMCF_GBW_PM = open(f'{SPICE_NETLIST_DIR}/{file_name}', 'r') 
+            AMP_NMCF_GBW_PM = open(f'{self.path}/{file_name}', 'r') 
             lines_GBW_PM = AMP_NMCF_GBW_PM.readlines()     
             freq = []                       
             GBW_ac = []
@@ -91,11 +92,11 @@ class OutputParser2(DeviceParams):
                 
             return freq, GBW_ac, phase_margin_ac
         except:
-            print("Simulation errors, no .GBW_PM simulation results.")
+            print("gbw_pm simulation errors, no .GBW_PM simulation results.")
             
     def dc(self, file_name):
         try:
-            AMP_NMCF_dc = open(f'{SPICE_NETLIST_DIR}/{file_name}', 'r')
+            AMP_NMCF_dc = open(f'{self.path}/{file_name}', 'r')
             lines_dc = AMP_NMCF_dc.readlines()
             Temp_dc = []                     
             TC_dc = []
@@ -108,14 +109,14 @@ class OutputParser2(DeviceParams):
                 TC_dc.append(float(Vdc[1]))
                 Power_dc.append(float(Vdc[3])) 
                 vos_dc.append(float(Vdc[5]))
-          
+            
             return Temp_dc, TC_dc, Power_dc, vos_dc
         except:
-            print("Simulation errors, no .OP simulation results.")
+            print("dc simulation errors, no .OP simulation results.")
       
     def tran(self, file_name):
         try:
-            AMP_NMCF_tran = open(f'{SPICE_NETLIST_DIR}/{file_name}', 'r')
+            AMP_NMCF_tran = open(f'{self.path}/{file_name}', 'r')
             lines_tran = AMP_NMCF_tran.readlines()
             time = []                         
             sr_rise = []
@@ -129,12 +130,12 @@ class OutputParser2(DeviceParams):
 
             return time, sr_rise, sr_fall
         except:
-                print("Simulation errors, no .TRAN simulation results.")
+                print("tran simulation errors, no .TRAN simulation results.")
 
             
     def dcop(self, file_name):
         try:
-            AMP_NMCF_op = open(f'{SPICE_NETLIST_DIR}/{file_name}', 'r')
+            AMP_NMCF_op = open(f'{self.path}/{file_name}', 'r')
             
             lines_op = AMP_NMCF_op.readlines()
             for index, line in enumerate(lines_op):
@@ -185,7 +186,7 @@ class OutputParser2(DeviceParams):
             
             return self.op
         except:
-            print("Simulation errors, no .OP simulation results.")
+            print("dcop simulation errors, no .OP simulation results.")
 
     def analyze_amplifier_performance(self, vinp, vout, time, d0):
         vinp = np.array(vinp)  
@@ -250,7 +251,7 @@ class OutputParser2(DeviceParams):
         vout_data = []
         time_data = []
         data_section = False
-        with open(f'{SPICE_NETLIST_DIR}/{file_name}', 'r')as f:
+        with open(f'{self.path}/{file_name}', 'r')as f:
             lines = f.readlines()
             for line in lines:
                 if line.strip():

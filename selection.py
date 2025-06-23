@@ -526,7 +526,7 @@ def nsga_selection(population, amp, times=10, selection=10):
                     amp.do_simulation(np.array(ind))
                     observation = amp._get_obs()
                     info = amp._get_info()
-                    evaluated_value = (info['Power'], info['dcgain'], info['GBW'], info['phase_margin (deg)'], info['TC'], info['vos'], info['cmrrdc'], info['PSRP'], info['PSRN'], info['sr'], info['setting_time'])
+                    evaluated_value = (info['Power'], info['dcgain'], info['GBW'], info['phase_margin (deg)'], info['TC'], info['vos'], info['cmrrdc'], info['PSRP'], info['PSRN'], info['sr'], info['settlingTime'])
                 except Exception as e:
                     print(f"Simulation failed for individual {ind}. Error: {e}")
                     evaluated_value = (float('inf'), -float('inf'), -float('inf'), -float('inf'), float('inf'), float('inf'), float('inf'), float('inf'), float('inf'), float('inf'), float('inf'))

@@ -13,9 +13,9 @@ from selection import sel_nsga_iii
 
 class NSGA_Agent:
 
-    def __init__(self, population_size=20, generation=10):
+    def __init__(self, population_size=16, generation=10):
         self.generation = generation
-        creator.create("FitnessMin", base.Fitness, weights=((1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)))
+        creator.create("FitnessMin", base.Fitness, weights=((1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)))
         creator.create("Individual", list, fitness=creator.FitnessMin)
         self.population = [creator.Individual(self.generate_individual()) for _ in range(population_size)]
         self.param_range_min = [1,1,0,
@@ -105,7 +105,7 @@ class NSGA_Agent:
         return offspring
     
     def add_individual(self, parameters, info):
-        evaluated_value = (info['Power'], info['dcgain'], info['GBW'], info['phase_margin (deg)'], info['TC'], info['vos'], info['cmrrdc'], info['PSRP'], info['PSRN'], info['sr'], info['setting_time'])
+        evaluated_value = (info['Power'][1], info['dcgain'][1], info['GBW'][1], info['phase_margin (deg)'][1], info['TC'][1], info['vos'][1], info['cmrrdc'][1], info['PSRP'][1], info['PSRN'][1], info['sr'][1], info['settlingTime'][1], info['reward'])
         ind = creator.Individual(parameters)
         ind.fitness.values = evaluated_value
         return ind

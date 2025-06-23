@@ -23,7 +23,6 @@ from gymnasium.envs.registration import register
 date = datetime.today().strftime('%Y-%m-%d')
 file_path = 'reward.csv'
 PWD = os.getcwd()
-SPICE_NETLIST_DIR = f'{PWD}/simulations'
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 env_id = 'sky130AMP_NMCF-v0'
@@ -168,7 +167,7 @@ class RewardModel(nn.Module):
             nn.ReLU(),
             nn.Linear(64, 32),
             nn.ReLU(),
-            nn.Linear(32, 11)
+            nn.Linear(32, 12)
         )
 
         self.optim = torch.optim.Adam(self.parameters(), lr=LR_r)
@@ -244,17 +243,17 @@ class Agent(object):
             
             l_s.append(torch.tensor(s, dtype=torch.float))
             l_a.append(torch.tensor(a, dtype=torch.float))
-            l_r.append(torch.tensor(r, dtype=torch.float).unsqueeze(0))
+            l_r.append(torch.tensor(r, dtype=torch.float))
             l_s_.append(torch.tensor(s_, dtype=torch.float))
-            l_done.append(torch.tensor(done, dtype=torch.float).unsqueeze(0))
+            l_done.append(torch.tensor(done, dtype=torch.float))
             l_old_prob.append(old_log_prob)
             l_parameter.append(torch.tensor(parameter, dtype=torch.float))
             l_info_score.append(torch.tensor(info_score, dtype=torch.float))
         s = torch.stack(l_s, dim=0)
         a = torch.stack(l_a, dim=0)
-        r = torch.stack(l_r, dim=0).squeeze(0)
+        r = torch.stack(l_r, dim=0)
         s_ = torch.stack(l_s_, dim=0)
-        done = torch.stack(l_done, dim=0).squeeze(0)
+        done = torch.stack(l_done, dim=0)
         old_log_prob = torch.stack(l_old_prob, dim=0)
         parameter = torch.stack(l_parameter, dim=0)
         info_score = torch.stack(l_info_score, dim=0)
@@ -266,6 +265,7 @@ class Agent(object):
         advantages = []
         last_advantage = 0
         for t in reversed(range(len(rewards))):
+            print(f"[DEBUG] t={t}, reward={rewards[t]}, value={values[t]}, next_value={next_values[t]}, done={dones[t]}")
             delta = rewards[t] + GAMMA * next_values[t] * (1 - dones[t]) - values[t]
             last_advantage = delta + GAMMA * LAMBDA * last_advantage * (1 - dones[t])
             advantages.insert(0, last_advantage)
@@ -282,21 +282,55 @@ class Agent(object):
         loss.backward()
         self.reward_model.optim.step()
 
-        with torch.no_grad():
-            old_values = self.old_v(s, self.edge_index).squeeze()
-            old_next_values = self.old_v(s_, self.edge_index).squeeze()
-        advantages = self.compute_advantages(r, old_values, old_next_values, done)
-        print("old_values old_next_values advantage:",old_values,old_next_values, advantages)
-        returns = advantages + old_values
+        advantages_all = []
+        returns_all = []
 
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        for traj_index in range(len(r)):
+            traj_r = r[traj_index]
+            traj_done = done[traj_index]
+            traj_s = s[traj_index]
+            traj_s_ = s_[traj_index]
+
+            with torch.no_grad():
+                traj_old_values = self.old_v(traj_s, self.edge_index).squeeze().cpu().numpy()
+                traj_old_next_values = self.old_v(traj_s_, self.edge_index).squeeze().cpu().numpy()
+
+            traj_advantages = self.compute_advantages(
+                rewards=traj_r,
+                values=traj_old_values,
+                next_values=traj_old_next_values,
+                dones=traj_done
+            )
+            traj_returns = traj_advantages + torch.tensor(traj_old_values).float()
+
+            # ±ê×¼»¯ advantage
+            traj_advantages = (traj_advantages - traj_advantages.mean()) / (traj_advantages.std() + 1e-8)
+
+
+            traj_advantages_tensor = torch.tensor(traj_advantages, dtype=torch.float32)
+            traj_returns_tensor = torch.tensor(traj_returns, dtype=torch.float32)
+            advantages_all.append(traj_advantages_tensor)
+            returns_all.append(traj_returns_tensor)
+        advantages = torch.stack(advantages_all, dim=0)  # shape: [num_trajectories, trajectory_length]
+        returns = torch.stack(returns_all, dim=0)
+        print(np.array(advantages).shape,np.array((returns)).shape)
+
+        #with torch.no_grad():
+        #    old_values = self.old_v(s, self.edge_index).squeeze()
+        #    old_next_values = self.old_v(s_, self.edge_index).squeeze()
+        #advantages = self.compute_advantages(r, old_values, old_next_values, done)
+        #print("old_values old_next_values advantage:",old_values,old_next_values, advantages)
+        #returns = advantages + old_values
+
+        #advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         for _ in range(K_epoch):
             current_logits = self.pi(s, self.edge_index)
-            current_logits = current_logits.view(-1, design_param, 3)
+            print(np.array(a).shape,np.array(s).shape, current_logits.detach().numpy().shape)
+            #current_logits = current_logits.view(-1, design_param, 3)
+            current_logits = current_logits.permute(0, 2, 1, 3)
             probs = F.softmax(current_logits, dim=-1)
             current_dist = Independent(Categorical(probs),1)
-            a = a.squeeze(1)
             log_probs = current_dist.log_prob(a)
             print("log_probs:",current_dist, log_probs,old_log_probs.squeeze(),a)
 
@@ -353,27 +387,37 @@ class Agent(object):
                   10])"""
 def main():
     reward_model = RewardModel(design_param)
-    env = gym.make(env_id, reward_model=reward_model)#options={"reward_model": reward_model})  
+    env = gym.make(env_id, reward_model=reward_model)
+    #env._init_random_sim(100)
     agent = Agent(reward_model)
     #agent.load()
     max_rewards = -1000000
     reset_sign = False
     creator.create("FitnessMin", base.Fitness, weights=((-1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0)))
     creator.create("Individual", list, fitness=creator.FitnessMin)
-    population = [creator.Individual(selection.generate_individual()) for _ in range(population_size)]
     for j in range(EP_MAX):
-        reset_index = j % population_size
-        #selected_individuals = selection.nsga_selection(population, iteration_times, population_size/2)
-        #population = selection.crossover_variation(selected_individuals)
-        s, _ = env.reset(episodes=reset_index)
-        rewards = 0
+        s, _ = env.reset()
+        rewards = []
         for i in range(STEPS):
             print("steps:", i)
             a, old_log_prob = agent.choose_action(torch.tensor(s, dtype=torch.float))
-            s_, r, done, parameters, info = env.step(a.squeeze())
-            #print("check s a:",s,a)
-            info_score = [info['Power'], info['dcgain'], info['GBW'], info['phase_margin (deg)'], info['TC'], info['vos'], info['cmrrdc'], info['PSRP'], info['PSRN'], info['sr'], info['setting_time']]
-            agent.push_data((s, a, r, s_, done, old_log_prob, parameters, info_score))
+            s_, r, done, parameters, info_batch = env.step(a.squeeze())
+            info = info_batch['info_batch']
+            single_info = []
+            for i in range(len(info)):
+                single_info.append([info[i]['Power'][1],
+                                    info[i]['dcgain'][1],
+                                    info[i]['GBW'][1],
+                                    info[i]['phase_margin (deg)'][1],
+                                    info[i]['TC'][1],
+                                    info[i]['vos'][1],
+                                    info[i]['cmrrdc'][1],
+                                    info[i]['PSRP'][1],
+                                    info[i]['PSRN'][1],
+                                    info[i]['sr'][1],
+                                    info[i]['settlingTime'][1],
+                                    info[i]['reward']])
+            agent.push_data((s, a, r, s_, done, old_log_prob, parameters, single_info))
             with open(file_path, mode='a', newline='') as file:
                 writer = csv.writer(file)
                 writer.writerow([r])
@@ -382,8 +426,9 @@ def main():
             #    break
             s = s_
         agent.updata()
-        if max_rewards < rewards:
-            max_rewards = rewards
+        episode_reward_sum = sum(rewards)
+        if max_rewards < episode_reward_sum:
+            max_rewards = episode_reward_sum
             agent.save()
  
 if __name__ == '__main__':
