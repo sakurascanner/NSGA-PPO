@@ -1,0 +1,16 @@
+.param W_diff=20
+.param L_diff=0.5     
+.param W_load1=10
+.param L_load1=0.5
+.param W_pmos_mirror=1.5
+.param L_pmos_mirror=1.5
+.param W_gm2=50
+.param L_gm2=0.15
+.param M_out_stage=20
+.param W_bias_n=2
+.param L_bias_n=5
+.param W_Rc=2
+.param L_bias=0.5
+.param W_min=0.5
+.param M_CC=2e-12
+.param current_0_bias=3e-06

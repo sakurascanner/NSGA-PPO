@@ -1,0 +1,29 @@
+*.subckt Leung_NMCF_Pin_3 gnda vdda vinn vinp vout Ib
+.subckt Leung_NMCF_Pin_3 gnda vdda vinp vinn vout Ib
+XM_master Ib Ib vdda vdda sky130_fd_pr__pfet_01v8 L=L_pmos_mirror W=W_pmos_mirror m=1
+
+XM1 net_d1 vinp net_tail vdda sky130_fd_pr__pfet_01v8 L=L_diff W=W_diff m=1
+XM2 net_d2 vinn net_tail vdda sky130_fd_pr__pfet_01v8 L=L_diff W=W_diff m=1
+XM3 net_d1 net_d1 gnda gnda sky130_fd_pr__nfet_01v8 L=L_load1 W=W_load1 m=1
+XM4 net_d2 net_d1 gnda gnda sky130_fd_pr__nfet_01v8 L=L_load1 W=W_load1 m=1
+XM5 net_tail Ib vdda vdda sky130_fd_pr__pfet_01v8 L=L_pmos_mirror W=W_pmos_mirror m=2
+
+XM6 vout net_d2 gnda gnda sky130_fd_pr__nfet_01v8 L=L_gm2 W=W_gm2 m=4
+XM7 vout Ib vdda vdda sky130_fd_pr__pfet_01v8 L=L_pmos_mirror W=W_pmos_mirror m=M_out_stage
+
+XM_feeder net_bias_n_gate Ib vdda vdda sky130_fd_pr__pfet_01v8 L=L_pmos_mirror W=W_pmos_mirror m=1
+
+XM14 net_bias_n_gate net_bias_n_gate net_bias_n_mid gnda sky130_fd_pr__nfet_01v8 L=L_bias_n W=W_bias_n m=1
+XM16 net_bias_n_mid net_bias_n_mid gnda gnda sky130_fd_pr__nfet_01v8 L=L_bias_n W=W_bias_n m=1
+
+XM8 net_bias_p net_bias_p vdda vdda sky130_fd_pr__pfet_01v8 L=L_pmos_mirror W=W_pmos_mirror m=1
+XM13 net_bias_p net_bias_n_gate net_bias_n_mid2 gnda sky130_fd_pr__nfet_01v8 L=L_bias_n W=W_bias_n m=1
+XM15 net_bias_n_mid2 net_bias_n_mid gnda gnda sky130_fd_pr__nfet_01v8 L=L_bias_n W=W_bias_n m=1
+
+XM10 net_bias_rc Ib vdda vdda sky130_fd_pr__pfet_01v8 L=L_pmos_mirror W=W_pmos_mirror m=1
+XM11 net_bias_rc net_bias_rc net_rc_mid gnda sky130_fd_pr__nfet_01v8 L=L_bias W=W_min m=1
+XM12 net_rc_mid net_rc_mid gnda gnda sky130_fd_pr__nfet_01v8 L=L_bias W=W_min m=1
+
+XM9 net_d2 net_bias_rc net_cc_node gnda sky130_fd_pr__nfet_01v8 L=L_bias W=W_Rc m=1
+XCc net_cc_node vout sky130_fd_pr__cap_mim_m3_1 W=30 L=30 MF=M_CC
+.ends Leung_NMCF_Pin_3

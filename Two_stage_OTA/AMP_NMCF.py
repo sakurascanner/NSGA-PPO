@@ -1,0 +1,907 @@
+import torch
+import numpy as np
+import os
+import math
+import json
+import csv
+#from tabulate import tabulate
+import gymnasium as gym
+from gymnasium import spaces
+import multiprocessing as mp
+import uuid
+import shutil
+from NSGA import NSGA_Agent #\tim.tan
+from selection import sel_nsga_iii #\\tim.tan
+from gymnasium import spaces
+
+from ckt_graph import GraphAMPNMCF
+from dev_params import DeviceParams
+from utils import ActionNormalizer, OutputParser2
+from datetime import datetime
+
+
+date = datetime.today().strftime('%Y-%m-%d')
+PWD = os.getcwd()
+SPICE_NETLIST_DIR = f'{PWD}/simulations'
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+
+CktGraph = GraphAMPNMCF 
+class AMPNMCFEnv(gym.Env, CktGraph, DeviceParams):
+
+    def __init__(self, **kwargs):
+        gym.Env.__init__(self)
+        CktGraph.__init__(self)
+        DeviceParams.__init__(self, self.ckt_hierarchy)
+
+        self.CktGraph = CktGraph()
+        self.NSGA_agent = NSGA_Agent(population_size=384) #tim.tan
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=self.obs_shape, dtype=np.float64)#tim.tan
+        self.action_space = spaces.Box(low=-1, high=1, shape=self.action_shape, dtype=np.float64)#tim.tan
+        self.delta_action = np.array([
+            0.5,    # W_diff
+            0.1,    # L_diff (³¤¶Èµ÷½ÚÐèÒª¸ü¾«Ï¸)
+            0.5,    # W_load1
+            0.1,    # L_load1
+            0.5,    # W_pmos_mirror
+            0.1,    # L_pmos_mirror
+            1.0,    # W_gm2 (´ó³ß´ç¹Ü£¬²½³¤¿ÉÒÔ´óÒ»µã)
+            0.01,   # L_gm2 (¶Ì¹µµÀ£¬ÐèÒª¼«¸ß¾«¶È£¬Èç 0.15 -> 0.16)
+            1,      # M_out_stage (±ØÐëÊÇÕûÊý)
+            0.5,    # W_bias_n
+            0.5,    # L_bias_n
+            0.1,    # W_Rc (µç×èµ÷½ÚÁéÃô)
+            1,# Cc_val (0.1pF)
+            0.5  # current_0_bias (0.5uA)
+        ])
+
+        # 2. ÏÂÏÞ¶¨Òå (Lower Bounds)
+        # Sky130 Ä£ÄâÉè¼Æ½¨Òé£ºL >= 0.5u (³ýÁË¸ßËÙÂ·¾¶), W >= 0.5u
+        self.action_space_low = np.array([
+            2.0,    # W_diff: ÊäÈë¶Ô²»ÄÜÌ«Ð¡£¬·ñÔòÔëÉùºÍÊ§Åä´ó
+            0.5,    # L_diff
+            1.0,    # W_load1
+            0.5,    # L_load1
+            1.0,    # W_pmos_mirror
+            0.5,    # L_pmos_mirror
+            5.0,    # W_gm2: ±ØÐë×ã¹»´óÒÔÌá¹© Gm
+            0.15,   # L_gm2: ÔÊÐíÊ¹ÓÃ¹¤ÒÕ×îÐ¡Öµ (150nm) »»È¡ËÙ¶È
+            2,      # M_out_stage: ÖÁÉÙÊÇ»ù×¼µçÁ÷µÄ2±¶
+            0.5,    # W_bias_n
+            1.0,    # L_bias_n: Æ«ÖÃµçÂ·½¨Òé³¤Ò»µã£¬Ôö¼ÓÊä³ö×è¿¹
+            0.5,    # W_Rc
+            1,# Cc_val: ×îÐ¡ 0.1pF
+            1.0  # current_0_bias: ×îÐ¡ 1uA
+        ])
+
+        # 3. ÉÏÏÞ¶¨Òå (Upper Bounds)
+        # ·ÀÖ¹³ß´ç¹ý´óµ¼ÖÂÃæ»ýÊ§¿Ø»ò¼ÄÉúµçÈÝ¹ý´ó
+        self.action_space_high = np.array([
+            100.0,  # W_diff
+            5.0,    # L_diff
+            50.0,   # W_load1
+            5.0,    # L_load1
+            50.0,   # W_pmos_mirror
+            5.0,    # L_pmos_mirror
+            200.0,  # W_gm2: Êä³ö¼¶Í¨³£ºÜ´ó
+            1.0,    # L_gm2
+            100,    # M_out_stage: ×î´ó100±¶µçÁ÷
+            20.0,   # W_bias_n
+            10.0,   # L_bias_n
+            10.0,   # W_Rc
+            50,# Cc_val: ×î´ó 10pF (Æ¬ÉÏµçÈÝºÜÕ¼Ãæ»ý)
+            50.0 # current_0_bias: ×î´ó 50uA
+        ])
+        self.max_pop_size = 3000
+        self.parameters_population = []
+        self.num_workers = mp.cpu_count()
+        self.pool = mp.Pool(processes=self.num_workers)
+        self.initial_NSGA_population(self.NSGA_agent.population, 12)
+        
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        if 'pool' in state:
+            del state['pool']
+        return state
+        
+    def initial_NSGA_population(self, population, times):
+        for i in range(times):
+            # 1. ÅÜ·ÂÕæ
+            results = self.pool.map(simulate_individual, [(self, ind, j) for j, ind in enumerate(population)])
+
+            # 2. ¸³Öµ fitness
+            for ind, info in zip(population,results):
+                ind.fitness.values = (info['Power'][1], info['dcgain'][1], info['GBW'][1], info['phase_margin (deg)'][1], info['TC'][1], info['vos'][1], info['cmrrdc'][1], info['PSRP'][1], info['PSRN'][1], info['sr'][1], info['settlingTime'][1], info['reward'])
+
+            with open("fitness.csv", mode='a', newline='') as file:
+                writer = csv.writer(file)
+                for ind in population:
+                    row = [f"Init_Gen_{i}"] + list(ind) + list(ind.fitness.values)
+                    writer.writerow(row)
+            # ==========================================
+
+            #print(results)
+            
+            # 3. »·¾³Ñ¡Ôñ
+            selected_individuals = sel_nsga_iii(population, k=384)
+            
+            if i == times-1:
+                population[:] = selected_individuals
+                break
+                
+            # 4. ½»²æ±äÒì²úÉú×Ó´ú
+            offspring = self.NSGA_agent.crossover_variation(selected_individuals)
+            population[:] = selected_individuals + offspring
+        
+    def _initialize_simulation(self, episodes):
+        self.parameters_population = [np.array(ind) for ind in self.NSGA_agent.population]
+        ind = self.NSGA_agent.population
+        return np.array(ind[episodes])
+
+    #one processer
+    def _do_simulation(self, action: np.array):
+        unique_id = str(uuid.uuid4())[:8]
+        sim_dir = f"{SPICE_NETLIST_DIR}/{unique_id}"
+        os.makedirs(sim_dir, exist_ok=True)
+
+        W_diff, L_diff,\
+        W_load1, L_load1,\
+        W_pmos_mirror,L_pmos_mirror,\
+        W_gm2, L_gm2, \
+        M_out_stage, \
+        W_bias_n, L_bias_n, \
+        W_Rc, \
+        Cc_val, \
+        Ib= action 
+
+
+        
+        M_out_stage = int(M_out_stage)
+        try:
+            AMP_NMCF_vars = open(f'{SPICE_NETLIST_DIR}/AMP_NMCF_vars.spice', 'r')
+            lines = AMP_NMCF_vars.readlines()
+            lines[0] = f'.param W_diff={W_diff} L_diff={L_diff}\n'
+            lines[1] = f'.param W_load1={W_load1} L_load1={L_load1}\n'
+            lines[2] = f'.param L_pmos_mirror={L_pmos_mirror} W_pmos_mirror={W_pmos_mirror}\n'
+            lines[3] = f'.param W_gm2={W_gm2} L_gm2={L_gm2}\n'
+            lines[4] = f'.param M_out_stage={M_out_stage}\n'
+            lines[5] = f'.param W_bias_n={W_bias_n} L_bias_n={L_bias_n}\n'
+            lines[6] = f'.param W_Rc={W_Rc}\n'
+            lines[7] = f'.param M_CC={Cc_val}\n'
+            lines[8] = f'.param L_bias=2\n'
+            lines[9] = f'.param W_min=0.5\n'
+            lines[10] = f'.param current_0_bias={Ib}e-6\n'
+            lines[11] = f'\n'
+            lines[12] = f'\n'
+            lines[13] = f'\n'
+            lines[14] = f'\n'
+            lines[15] = f'\n'
+            
+            Unique_var_path = os.path.join(sim_dir, "AMP_NMCF_vars.spice")
+            AMP_NMCF_vars = open(Unique_var_path, 'w')
+            AMP_NMCF_vars.writelines(lines)
+            AMP_NMCF_vars.close()
+
+            AMP_NMCF_ACDC = open(f'{SPICE_NETLIST_DIR}/AMP_NMCF_ACDC.cir', 'r')
+            lines = AMP_NMCF_ACDC.readlines()
+            lines[6] = f'.include ../../simulations/NMCF_Pin_3_HSPICE_130.txt\n'
+            lines[10] = f'.include ../../mosfet_model/sky130_pdk/libs.tech/ngspice/corners/tt.spice\n'
+            lines[11] = f'.include ../../mosfet_model/sky130_pdk/libs.tech/ngspice/r+c/res_typical__cap_typical.spice\n'
+            lines[12] = f'.include ../../mosfet_model/sky130_pdk/libs.tech/ngspice/r+c/res_typical__cap_typical__lin.spice\n'
+            lines[13] = f'.include ../../mosfet_model/sky130_pdk/libs.tech/ngspice/corners/tt/specialized_cells.spice\n'
+            lines[21] = f'.include AMP_NMCF_vars.spice\n'
+            lines[118] = f'.include ../../simulations/AMP_NMCF_dev_params.spice\n'
+            Unique_ACDC_path = os.path.join(sim_dir, "AMP_NMCF_ACDC.cir")
+            AMP_NMCF_ACDC = open(Unique_ACDC_path, 'w')
+            AMP_NMCF_ACDC.writelines(lines)
+            AMP_NMCF_ACDC.close()
+
+            AMP_NMCF_Tran = open(f'{SPICE_NETLIST_DIR}/AMP_NMCF_Tran.cir', 'r')
+            lines = AMP_NMCF_Tran.readlines()
+            lines[6] = f'.include ../../simulations/NMCF_Pin_3_HSPICE_130.txt\n'
+            lines[10] = f'.include ../../mosfet_model/sky130_pdk/libs.tech/ngspice/corners/tt.spice\n'
+            lines[11] = f'.include ../../mosfet_model/sky130_pdk/libs.tech/ngspice/r+c/res_typical__cap_typical.spice\n'
+            lines[12] = f'.include ../../mosfet_model/sky130_pdk/libs.tech/ngspice/r+c/res_typical__cap_typical__lin.spice\n'
+            lines[13] = f'.include ../../mosfet_model/sky130_pdk/libs.tech/ngspice/corners/tt/specialized_cells.spice\n'
+            lines[27] = f'.include AMP_NMCF_vars.spice\n'
+            lines[80] = f'.include ../../simulations/AMP_NMCF_dev_params.spice\n'
+            Unique_Tran_path = os.path.join(sim_dir, "AMP_NMCF_Tran.cir")
+            AMP_NMCF_Tran = open(Unique_Tran_path, 'w')
+            AMP_NMCF_Tran.writelines(lines)
+            AMP_NMCF_Tran.close()
+
+            
+            os.system(f'cd {sim_dir}&& ngspice -b -o AMP_NMCF_ACDC.log AMP_NMCF_ACDC.cir > /dev/null 2>&1')
+            os.system(f'cd {sim_dir}&& ngspice -b -o AMP_NMCF_Tran.log AMP_NMCF_Tran.cir > /dev/null 2>&1')
+            os.system(f'ls {sim_dir}')
+            #print('*** Simulations Done! ***')
+        except:
+            print('ERROR')
+
+        return sim_dir, Ib
+
+    #one batch
+    def do_simulation(self, action):
+        sim_dir, Ib = self._do_simulation(action)
+        sim_results = OutputParser2(self.CktGraph, sim_dir)
+        op_results = sim_results.dcop(file_name='AMP_NMCF_op')
+        return op_results, sim_results, Ib
+
+    #need batch
+    def reset(self, seed=None, options=None):
+        num_params = self.action_space_low.shape[0]
+        self.parameters_population = np.array([np.array(ind) for ind in sel_nsga_iii(self.NSGA_agent.population, 384)])
+        idx_integer_params = [8, 12] 
+        observation_batch = []
+        info_batch = []
+        for idx in idx_integer_params:
+            if idx < num_params: 
+                self.parameters_population[:, idx] = np.round(self.parameters_population[:, idx])
+        results = self.pool.map(rst_simulate_individual, [(self, ind, j) for j, ind in enumerate(self.parameters_population)])
+        for observation, info in results:
+            observation_batch.append(observation)
+            info_batch.append(info)
+        return observation_batch, {}
+    
+    def close(self):
+        return None
+    
+    def step(self, action):
+        if isinstance(action, torch.Tensor):
+            action = action.detach().cpu().numpy()
+        delta = self.delta_action * (action - 1)
+        observation_batch = []
+        info_batch = []
+        reward_batch = []
+        done_batch = []
+
+        delta = self.delta_action * (action - 1)
+        self.parameters_population = np.clip(self.parameters_population + delta,
+                                        self.action_space_low,
+                                        self.action_space_high)
+
+        #print("Get in step!")
+        results = self.pool.map(stp_simulate_individual, [(self, ind, j) for j, ind in enumerate(self.parameters_population)])
+        for new_ind, observation, info, reward, done in results:
+            observation_batch.append(observation)
+            info_batch.append(info)
+            reward_batch.append(reward)
+            done_batch.append(done)
+            if reward > -5.0: 
+                new_individual = self.NSGA_agent.add_individual(new_ind, info)
+                self.NSGA_agent.population.append(new_individual)
+        if len(self.NSGA_agent.population) > self.max_pop_size:
+            #print(f"> InfoBuffer truncating from {len(self.NSGA_agent.population)} to 320...")#96 320 1500
+            self.NSGA_agent.population = sel_nsga_iii(self.NSGA_agent.population, k=1500)
+        
+        return observation_batch, reward_batch, done_batch, self.parameters_population, False, {"info_batch": info_batch},
+
+    def _get_obs(self, op_results, Ib):
+        # pick some .OP params from the dict:
+        try:
+            f = open(f'{SPICE_NETLIST_DIR}/AMP_NMCF_op_mean_std.json')
+            op_mean_std = json.load(f)
+            op_mean = op_mean_std['OP_M_mean']
+            op_std = op_mean_std['OP_M_std']
+            op_mean = np.array([op_mean['id'], op_mean['gm'], op_mean['gds'], op_mean['vth'], op_mean['vdsat'], op_mean['vds'], op_mean['vgs']])
+            op_std = np.array([op_std['id'], op_std['gm'], op_std['gds'], op_std['vth'], op_std['vdsat'], op_std['vds'], op_std['vgs']])
+            f.close()
+        except:
+            print('You need to run <_random_op_sims> to generate mean and std for transistor .OP parameters')
+
+        OP_M1 = op_results['M1']
+        OP_M1_norm = (np.array([OP_M1['id'],
+                                OP_M1['gm'],
+                                OP_M1['gds'],
+                                OP_M1['vth'],
+                                OP_M1['vdsat'],
+                                OP_M1['vds'],
+                                OP_M1['vgs']
+                                ]) - op_mean)/op_std
+        OP_M2 = op_results['M2']
+        OP_M2_norm = (np.array([OP_M2['id'],
+                                OP_M2['gm'],
+                                OP_M2['gds'],
+                                OP_M2['vth'],
+                                OP_M2['vdsat'],
+                                OP_M2['vds'],
+                                OP_M2['vgs']
+                                ]) - op_mean)/op_std
+        OP_M3 = op_results['M3']
+        OP_M3_norm = (np.array([OP_M3['id'],
+                                OP_M3['gm'],
+                                OP_M3['gds'],
+                                OP_M3['vth'],
+                                OP_M3['vdsat'],
+                                OP_M3['vds'],
+                                OP_M3['vgs']
+                                ]) - op_mean)/op_std
+        OP_M4 = op_results['M4']
+        OP_M4_norm = (np.array([OP_M4['id'],
+                                OP_M4['gm'],
+                                OP_M4['gds'],
+                                OP_M4['vth'],
+                                OP_M4['vdsat'],
+                                OP_M4['vds'],
+                                OP_M4['vgs']
+                                ]) - op_mean)/op_std
+        OP_M5 = op_results['M5']
+        OP_M5_norm = (np.array([OP_M5['id'],
+                                OP_M5['gm'],
+                                OP_M5['gds'],
+                                OP_M5['vth'],
+                                OP_M5['vdsat'],
+                                OP_M5['vds'],
+                                OP_M5['vgs']
+                                ]) - op_mean)/op_std
+        OP_M6 = op_results['M6']
+        OP_M6_norm = (np.array([OP_M6['id'],
+                                OP_M6['gm'],
+                                OP_M6['gds'],
+                                OP_M6['vth'],
+                                OP_M6['vdsat'],
+                                OP_M6['vds'],
+                                OP_M6['vgs']
+                                ]) - op_mean)/op_std
+        OP_M7 = op_results['M7']
+        OP_M7_norm = (np.array([OP_M7['id'],
+                                OP_M7['gm'],
+                                OP_M7['gds'],
+                                OP_M7['vth'],
+                                OP_M7['vdsat'],
+                                OP_M7['vds'],
+                                OP_M7['vgs']
+                                ]) - op_mean)/op_std
+        OP_M8 = op_results['M8']
+        OP_M8_norm = (np.array([OP_M8['id'],
+                                OP_M8['gm'],
+                                OP_M8['gds'],
+                                OP_M8['vth'],
+                                OP_M8['vdsat'],
+                                OP_M8['vds'],
+                                OP_M8['vgs']
+                                ]) - op_mean)/op_std
+        OP_M9 = op_results['M9']
+        OP_M9_norm = (np.array([OP_M9['id'],
+                                OP_M9['gm'],
+                                OP_M9['gds'],
+                                OP_M9['vth'],
+                                OP_M9['vdsat'],
+                                OP_M9['vds'],
+                                OP_M9['vgs']
+                                ]) - op_mean)/op_std
+        OP_M10 = op_results['M10']
+        OP_M10_norm = (np.array([OP_M10['id'],
+                                OP_M10['gm'],
+                                OP_M10['gds'],
+                                OP_M10['vth'],
+                                OP_M10['vdsat'],
+                                OP_M10['vds'],
+                                OP_M10['vgs']
+                                ]) - op_mean)/op_std
+        OP_M11 = op_results['M11']
+        OP_M11_norm = (np.array([OP_M11['id'],
+                                OP_M11['gm'],
+                                OP_M11['gds'],
+                                OP_M11['vth'],
+                                OP_M11['vdsat'],
+                                OP_M11['vds'],
+                                OP_M11['vgs']
+                                ]) - op_mean)/op_std
+        OP_M12 = op_results['M12']
+        OP_M12_norm = (np.array([OP_M12['id'],
+                                OP_M12['gm'],
+                                OP_M12['gds'],
+                                OP_M12['vth'],
+                                OP_M12['vdsat'],
+                                OP_M12['vds'],
+                                OP_M12['vgs']
+                                ]) - op_mean)/op_std
+        OP_M13 = op_results['M13']
+        OP_M13_norm = (np.array([OP_M13['id'],
+                                OP_M13['gm'],
+                                OP_M13['gds'],
+                                OP_M13['vth'],
+                                OP_M13['vdsat'],
+                                OP_M13['vds'],
+                                OP_M13['vgs']
+                                ]) - op_mean)/op_std
+        OP_M14 = op_results['M14']
+        OP_M14_norm = (np.array([OP_M14['id'],
+                                OP_M14['gm'],
+                                OP_M14['gds'],
+                                OP_M14['vth'],
+                                OP_M14['vdsat'],
+                                OP_M14['vds'],
+                                OP_M14['vgs']
+                                ]) - op_mean)/op_std
+        OP_M15 = op_results['M15']
+        OP_M15_norm = (np.array([OP_M15['id'],
+                                OP_M15['gm'],
+                                OP_M15['gds'],
+                                OP_M15['vth'],
+                                OP_M15['vdsat'],
+                                OP_M15['vds'],
+                                OP_M15['vgs']
+                                ]) - op_mean)/op_std
+        OP_M16 = op_results['M16']
+        OP_M16_norm = (np.array([OP_M16['id'],
+                                OP_M16['gm'],
+                                OP_M16['gds'],
+                                OP_M16['vth'],
+                                OP_M16['vdsat'],
+                                OP_M16['vds'],
+                                OP_M16['vgs']
+                                ]) - op_mean)/op_std
+        OP_M_master = op_results['M_master']
+        OP_M17_norm = (np.array([OP_M_master['id'],
+                                OP_M_master['gm'],
+                                OP_M_master['gds'],
+                                OP_M_master['vth'],   
+                                OP_M_master['vdsat'],
+                                OP_M_master['vds'],
+                                OP_M_master['vgs']
+                                ]) - op_mean)/op_std
+        OP_M_feeder = op_results['M_feeder']
+        OP_M18_norm = (np.array([OP_M_feeder['id'],
+                                OP_M_feeder['gm'],
+                                OP_M_feeder['gds'],
+                                OP_M_feeder['vth'],
+                                OP_M_feeder['vdsat'],
+                                OP_M_feeder['vds'],
+                                OP_M_feeder['vgs']
+                                ]) - op_mean)/op_std
+        # it is not straightforward to extract resistance info from sky130 resistor, using the following approximation instead
+        # normalize all passive components
+        OP_C0_norm = ActionNormalizer(action_space_low=self.C0_low, action_space_high=self.C0_high).reverse_action(op_results['Cc']['c']) # convert to (-1, 1)
+        
+        # state shall be in the order of node (node0, node1, ...)
+        observation = np.array([
+                               [0,0,0,0,      0,     OP_M1_norm[0],OP_M1_norm[1],OP_M1_norm[2],OP_M1_norm[3],OP_M1_norm[4],OP_M1_norm[5],OP_M1_norm[6]],
+                               [0,0,0,0,      0,      OP_M2_norm[0],OP_M2_norm[1],OP_M2_norm[2],OP_M2_norm[3],OP_M2_norm[4],OP_M2_norm[5],OP_M2_norm[6]],
+                               [0,0,0,0,      0,      OP_M3_norm[0],OP_M3_norm[1],OP_M3_norm[2],OP_M3_norm[3],OP_M3_norm[4],OP_M3_norm[5],OP_M3_norm[6]],
+                               [0,0,0,0,      0,      OP_M4_norm[0],OP_M4_norm[1],OP_M4_norm[2],OP_M4_norm[3],OP_M4_norm[4],OP_M4_norm[5],OP_M4_norm[6]],
+                               [0,0,0,0,      0,      OP_M5_norm[0],OP_M5_norm[1],OP_M5_norm[2],OP_M5_norm[3],OP_M5_norm[4],OP_M5_norm[5],OP_M5_norm[6]],
+                               [0,0,0,0,      0,      OP_M6_norm[0],OP_M6_norm[1],OP_M6_norm[2],OP_M6_norm[3],OP_M6_norm[4],OP_M6_norm[5],OP_M6_norm[6]],
+                               [0,0,0,0,      0,      OP_M7_norm[0],OP_M7_norm[1],OP_M7_norm[2],OP_M7_norm[3],OP_M7_norm[4],OP_M7_norm[5],OP_M7_norm[6]],
+                               [0,0,0,0,      0,      OP_M8_norm[0],OP_M8_norm[1],OP_M8_norm[2],OP_M8_norm[3],OP_M8_norm[4],OP_M8_norm[5],OP_M8_norm[6]],
+                               [0,0,0,0,      0,      OP_M9_norm[0],OP_M9_norm[1],OP_M9_norm[2],OP_M9_norm[3],OP_M9_norm[4],OP_M9_norm[5],OP_M9_norm[6]],
+                               [0,0,0,0,      0,      OP_M10_norm[0],OP_M10_norm[1],OP_M10_norm[2],OP_M10_norm[3],OP_M10_norm[4],OP_M10_norm[5],OP_M10_norm[6]],
+                               [0,0,0,0,      0,      OP_M11_norm[0],OP_M11_norm[1],OP_M11_norm[2],OP_M11_norm[3],OP_M11_norm[4],OP_M11_norm[5],OP_M11_norm[6]],
+                               [0,0,0,0,      0,      OP_M12_norm[0],OP_M12_norm[1],OP_M12_norm[2],OP_M12_norm[3],OP_M12_norm[4],OP_M12_norm[5],OP_M12_norm[6]],
+                               [0,0,0,0,      0,      OP_M13_norm[0],OP_M13_norm[1],OP_M13_norm[2],OP_M13_norm[3],OP_M13_norm[4],OP_M13_norm[5],OP_M13_norm[6]],
+                               [0,0,0,0,      0,      OP_M14_norm[0],OP_M14_norm[1],OP_M14_norm[2],OP_M14_norm[3],OP_M14_norm[4],OP_M14_norm[5],OP_M14_norm[6]],
+                               [0,0,0,0,      0,      OP_M15_norm[0],OP_M15_norm[1],OP_M15_norm[2],OP_M15_norm[3],OP_M15_norm[4],OP_M15_norm[5],OP_M15_norm[6]],
+                               [0,0,0,0,      0,      OP_M16_norm[0],OP_M16_norm[1],OP_M16_norm[2],OP_M16_norm[3],OP_M16_norm[4],OP_M16_norm[5],OP_M16_norm[6]],
+                               [0,0,0,0,      0,      OP_M17_norm[0],OP_M17_norm[1],OP_M17_norm[2],OP_M17_norm[3],OP_M17_norm[4],OP_M17_norm[5],OP_M17_norm[6]],     
+                               [0,0,0,0,      0,      OP_M18_norm[0],OP_M18_norm[1],OP_M18_norm[2],OP_M18_norm[3],OP_M18_norm[4],OP_M18_norm[5],OP_M18_norm[6]],
+                               
+                               [self.Vdd,0,0,0,0,      0,0,0,0,0,0,0],
+                               [0,self.GND,0,0,0,      0,0,0,0,0,0,0],
+                               [0,0,Ib,0,0,       0,0,0,0,0,0,0],
+                               [0,0,0,OP_C0_norm,0,    0,0,0,0,0,0,0],           
+                               ])
+        # clip the obs for better regularization
+        observation = np.clip(observation, -5, 5)
+        
+        return observation 
+
+    def _get_info(self, sim_results):
+        '''Evaluate the performance'''
+        ''' DC '''
+        dc_results = sim_results.dc(file_name='AMP_NMCF_ACDC_DC')
+        TC = dc_results[1][1]
+        Power = dc_results[2][1]
+        vos_1 = dc_results[3][1]
+        vos = abs(vos_1)
+             
+        TC_score = np.max(np.min([(self.TC_target - TC) / (self.TC_target + TC), 0]),-1)
+        Power_score = np.max(np.min([(self.Power_target - Power) / (self.Power_target + Power), 0]),-1)
+        vos_score = np.max(np.min([(self.vos_target - vos) / (self.vos_target + vos), 0]),-1)
+        if vos > 0.01:
+            vos_score = -1
+
+        ''' AC '''
+        ac_results = sim_results.ac(file_name='AMP_NMCF_ACDC_AC')
+        cmrrdc = ac_results[1][1]
+        if cmrrdc > 0 :
+            cmrrdc_score = -1
+        else : 
+            cmrrdc_score = np.max(np.min([(cmrrdc - self.cmrrdc_target) / (cmrrdc + self.cmrrdc_target), 0]),-1)
+            if cmrrdc < self.cmrrdc_target:
+                cmrrdc_score = 0
+
+        PSRP = ac_results[2][1]
+        if PSRP > 0 :
+            PSRP_score = -1
+        else : 
+            PSRP_score = np.max(np.min([(PSRP - self.PSRP_target) / (PSRP + self.PSRP_target), 0]),-1)
+            if PSRP < self.PSRP_target:
+                PSRP_score = 0
+
+        PSRN = ac_results[3][1]
+        if PSRN > 0 :
+            PSRN_score = -1
+        else : 
+            PSRN_score = np.max(np.min([(PSRN - self.PSRN_target) / (PSRN + self.PSRN_target), 0]),-1)
+            if PSRN < self.PSRN_target:
+                PSRN_score = 0
+
+        dcgain = ac_results[4][1]
+        if dcgain > 0 :
+            try:
+                dcgain_score = np.clip((dcgain - self.dcgain_target) / (dcgain + self.dcgain_target),-1,0)
+                GBW_PM_results = sim_results.GBW_PM(file_name='AMP_NMCF_ACDC_GBW_PM')
+                GBW = GBW_PM_results[1][1]
+                GBW_score = np.clip((GBW - self.GBW_target) / (GBW + self.GBW_target),-1,0)
+                phase_margin = GBW_PM_results[2][1]
+                phase_margin_score = np.clip((phase_margin - self.phase_margin_target) / (phase_margin + self.phase_margin_target),-1,0)
+                if phase_margin > 170 or phase_margin < 10:
+                    phase_margin_score = -1
+            except: 
+                if phase_margin > 170 or phase_margin < 10:
+                    phase_margin = 0
+                    phase_margin_score = -1
+        else :
+            dcgain_score = -1
+            GBW = 0
+            GBW_score = -1
+            phase_margin = 0
+            phase_margin_score = -1
+      
+        """ Tran """
+        tran_results = sim_results.tran(file_name='AMP_NMCF_Tran')
+        sr_rise = tran_results[1][1]
+        sr_fall = tran_results[2][1]
+        sr = (sr_rise + sr_fall) / 2 
+        sr_score = np.max(np.min([(sr - self.sr_target) / (sr + self.sr_target), 0]),-1)
+
+        """ setting_time """
+        meas = {}
+        d0 = 0.01
+        # path = './benchmarks/TB_Amplifier_ACDC/'
+        time_data, vin_data, vout_data = sim_results.extract_tran_data(file_name='tran.dat')
+        if time_data is None:
+            return None
+        d0_settle, d1_settle, d2_settle, stable, SR_p, settling_time_p, SR_n, settling_time_n = sim_results.analyze_amplifier_performance(vin_data, vout_data, time_data, d0)
+        d0_settle = abs(d0_settle)
+        d1_settle = abs(d1_settle)
+        d2_settle = abs(d2_settle)
+        SR_n = abs(SR_n)
+        SR_p = abs(SR_p)
+        settlingTime_p = abs(settling_time_p)
+        settlingTime_n = abs(settling_time_n)
+    
+        if math.isnan(d0_settle):
+            d0_settle = 10
+    
+        if math.isnan(d1_settle) or math.isnan(d2_settle) :
+            if math.isnan(d1_settle):
+                d0_settle += 10
+            if math.isnan(d2_settle):
+                d0_settle += 10
+            d_settle = d0_settle
+        else:
+            d_settle = max(d0_settle, d1_settle, d2_settle)
+    
+        if math.isnan(SR_p) or math.isnan(SR_n) :
+            SR = -d_settle
+        else:
+            SR = min(SR_p,SR_n)
+    
+        if math.isnan(settlingTime_p) or math.isnan(settlingTime_n) :
+            settlingTime = d_settle
+        else:
+            settlingTime = max(settlingTime_p, settlingTime_n)
+        
+        meas['d_settle'] = d_settle
+        meas['SR'] = SR
+        meas['settlingTime'] = settlingTime
+        settlingTime_score = np.max(np.min([(self.settlingTime_target - settlingTime) / (self.settlingTime_target + settlingTime), 0]),-1)
+
+        if sr_score < -1:
+            sr_score = -1
+
+        #shutil.rmtree(sim_results.path)
+
+    
+        """ Total reward """
+        reward = TC_score + Power_score + vos_score + cmrrdc_score + \
+                      dcgain_score + GBW_score + phase_margin_score + PSRP_score + \
+                      PSRN_score + sr_score + settlingTime_score 
+        if reward >= 0:
+            reward = 10
+                                        
+        return {
+                'TC': [TC, TC_score], 
+                'Power': [Power, Power_score], 
+                'vos': [vos, vos_score], 
+                'cmrrdc': [cmrrdc, cmrrdc_score], 
+                'dcgain': [dcgain, dcgain_score], 
+
+                'GBW': [GBW, GBW_score], 
+                'phase_margin (deg)': [phase_margin, phase_margin_score], 
+                'PSRP': [PSRP, PSRP_score], 
+                'PSRN': [PSRN, PSRN_score], 
+
+                'sr': [sr, sr_score], 
+                'settlingTime': [settlingTime, settlingTime_score],
+                'reward': reward
+            }
+
+
+    def _init_random_sim(self, max_sims=100):
+        '''
+        
+        This is NOT the same as the random step in the agent, here is basically 
+        doing some completely random design variables selection for generating
+        some device parameters for calculating the mean and variance for each
+        .OP device parameters (getting a statistical idea of, how each ckt parameter's range is like'), 
+        so that you can do the normalization for the state representations later.
+    
+        '''
+        random_op_count = 0
+        OP_M_lists = []
+        OP_R_lists = []
+        OP_C_lists = []
+        OP_V_lists = []
+        OP_I_lists = []
+        
+        while random_op_count <= max_sims :
+            #print(f'* simulation #{random_op_count} *')
+            action = np.random.uniform(self.action_space_low, self.action_space_high, self.action_dim) 
+            #print(f'action: {action}')
+            sim_dir = self._do_simulation(action)
+    
+            sim_results = OutputParser2(self.CktGraph, sim_dir)
+            op_results = sim_results.dcop(file_name='AMP_NMCF_op')
+            
+            OP_M_list = []
+            OP_R_list = []
+            OP_C_list = []
+            OP_V_list = []
+            OP_I_list = []
+
+            for key in list(op_results):
+                if key[0] == 'M' or key[0] == 'm':
+                    OP_M = np.array([op_results[key][f'{item}'] for item in list(op_results[key])])    
+                    OP_M_list.append(OP_M)
+                elif key[0] == 'R' or key[0] == 'r':
+                    OP_R = np.array([op_results[key][f'{item}'] for item in list(op_results[key])])    
+                    OP_R_list.append(OP_R)
+                elif key[0] == 'C' or key[0] == 'c':
+                    OP_C = np.array([op_results[key][f'{item}'] for item in list(op_results[key])])    
+                    OP_C_list.append(OP_C)   
+                elif key[0] == 'V' or key[0] == 'v':
+                    OP_V = np.array([op_results[key][f'{item}'] for item in list(op_results[key])])    
+                    OP_V_list.append(OP_V)
+                elif key[0] == 'I' or key[0] == 'i':
+                    OP_I = np.array([op_results[key][f'{item}'] for item in list(op_results[key])])    
+                    OP_I_list.append(OP_I)   
+                else:
+                    None
+                    
+            OP_M_list = np.array(OP_M_list)
+            OP_R_list = np.array(OP_R_list)
+            OP_C_list = np.array(OP_C_list)
+            OP_V_list = np.array(OP_V_list)
+            OP_I_list = np.array(OP_I_list)
+                        
+            OP_M_lists.append(OP_M_list)
+            OP_R_lists.append(OP_R_list)
+            OP_C_lists.append(OP_C_list)
+            OP_V_lists.append(OP_V_list)
+            OP_I_lists.append(OP_I_list)
+            
+            random_op_count = random_op_count + 1
+
+        OP_M_lists = np.array(OP_M_lists)
+        OP_R_lists = np.array(OP_R_lists)
+        OP_C_lists = np.array(OP_C_lists)
+        OP_V_lists = np.array(OP_V_lists)
+        OP_I_lists = np.array(OP_I_lists)
+        
+        if OP_M_lists.size != 0:
+            OP_M_mean = np.mean(OP_M_lists.reshape(-1, OP_M_lists.shape[-1]), axis=0)
+            OP_M_std = np.std(OP_M_lists.reshape(-1, OP_M_lists.shape[-1]),axis=0)
+            OP_M_mean_dict = {}
+            OP_M_std_dict = {}
+            for idx, key in enumerate(self.params_mos):
+                OP_M_mean_dict[key] = OP_M_mean[idx]
+                OP_M_std_dict[key] = OP_M_std[idx]
+        
+        if OP_R_lists.size != 0:
+            OP_R_mean = np.mean(OP_R_lists.reshape(-1, OP_R_lists.shape[-1]), axis=0)
+            OP_R_std = np.std(OP_R_lists.reshape(-1, OP_R_lists.shape[-1]),axis=0)
+            OP_R_mean_dict = {}
+            OP_R_std_dict = {}
+            for idx, key in enumerate(self. params_r):
+                OP_R_mean_dict[key] = OP_R_mean[idx]
+                OP_R_std_dict[key] = OP_R_std[idx]
+                
+        if OP_C_lists.size != 0:
+            OP_C_mean = np.mean(OP_C_lists.reshape(-1, OP_C_lists.shape[-1]), axis=0)
+            OP_C_std = np.std(OP_C_lists.reshape(-1, OP_C_lists.shape[-1]),axis=0)
+            OP_C_mean_dict = {}
+            OP_C_std_dict = {}
+            for idx, key in enumerate(self.params_c):
+                OP_C_mean_dict[key] = OP_C_mean[idx]
+                OP_C_std_dict[key] = OP_C_std[idx]     
+                
+        if OP_V_lists.size != 0:
+            OP_V_mean = np.mean(OP_V_lists.reshape(-1, OP_V_lists.shape[-1]), axis=0)
+            OP_V_std = np.std(OP_V_lists.reshape(-1, OP_V_lists.shape[-1]),axis=0)
+            OP_V_mean_dict = {}
+            OP_V_std_dict = {}
+            for idx, key in enumerate(self.params_v):
+                OP_V_mean_dict[key] = OP_V_mean[idx]
+                OP_V_std_dict[key] = OP_V_std[idx]
+        
+        if OP_I_lists.size != 0:
+            OP_I_mean = np.mean(OP_I_lists.reshape(-1, OP_I_lists.shape[-1]), axis=0)
+            OP_I_std = np.std(OP_I_lists.reshape(-1, OP_I_lists.shape[-1]),axis=0)
+            OP_I_mean_dict = {}
+            OP_I_std_dict = {}
+            for idx, key in enumerate(self.params_i):
+                OP_I_mean_dict[key] = OP_I_mean[idx]
+                OP_I_std_dict[key] = OP_I_std[idx]
+
+        self.OP_M_mean_std = {
+            'OP_M_mean': OP_M_mean_dict,         
+            'OP_M_std': OP_M_std_dict
+            }
+
+        with open(f'{sim_dir}/AMP_NMCF_op_mean_std.json','w') as file:
+            json.dump(self.OP_M_mean_std, file)
+
+
+def simulate_individual(args):
+    env, ind, idx = args
+    try:
+        #env._initialize_simulation(idx)
+        _, sim_results, _ = env.do_simulation(np.array(ind))
+        info = env._get_info(sim_results)
+        return info
+    except:
+        return  {
+                'TC': [0,-0.999],
+                'Power': [0,-0.999],
+                'vos': [0,-0.999],
+                'cmrrdc': [0,-0.999],
+                'dcgain': [0,-0.999],
+
+                'GBW': [0,-0.999],
+                'phase_margin (deg)': [0,-0.999],
+                'PSRP': [0,-0.999],
+                'PSRN': [0,-0.999],
+
+                'sr': [0,-0.999],
+                'settlingTime': [0,-0.999],
+                'reward': -11.0
+            }
+
+def rst_simulate_individual(args):
+    env, ind, idx = args
+    
+    # Éè¶¨×î´óÖØÊÔ´ÎÊý£¬·ÀÖ¹ËÀÑ­»·
+    max_retries = 20 
+    current_ind = ind
+    
+    for _ in range(max_retries):
+        try:
+            # ³¢ÊÔ·ÂÕæ
+            op_results, sim_results, Ib = env.do_simulation(np.array(current_ind))
+            
+            # Èç¹û³É¹¦£¬»ñÈ¡ Obs ºÍ Info
+            observation = env._get_obs(op_results, Ib)
+            info = env._get_info(sim_results)
+            return observation, info
+            
+        except:
+            current_ind = np.random.uniform(env.action_space_low, env.action_space_high)
+            
+            idx_integer_params = [8, 12]
+            for i in idx_integer_params:
+                current_ind[i] = np.round(current_ind[i])
+                
+            continue
+            
+    return observation, {
+                'TC': [0,-0.999],
+                'Power': [0,-0.999],
+                'vos': [0,-0.999],
+                'cmrrdc': [0,-0.999],
+                'dcgain': [0,-0.999],
+
+                'GBW': [0,-0.999],
+                'phase_margin (deg)': [0,-0.999],
+                'PSRP': [0,-0.999],
+                'PSRN': [0,-0.999],
+
+                'sr': [0,-0.999],
+                'settlingTime': [0,-0.999],
+                'reward': -11.0
+            }
+
+def stp_simulate_individual(args):
+    env, new_ind_individual, idx  = args
+    ''' run simulations '''
+    #env._initialize_simulation(idx)
+        
+    '''get observation'''
+    try:
+        op_results, sim_results, Ib = env.do_simulation(np.array(new_ind_individual))
+        observation = env._get_obs(op_results, Ib)
+        info = env._get_info(sim_results)
+    except:
+        observation = np.zeros((22, 12), dtype=np.float32) 
+        info = {
+                'TC': [0,-0.999],
+                'Power': [0,-0.999],
+                'vos': [0,-0.999],
+                'cmrrdc': [0,-0.999],
+                'dcgain': [0,-0.999],
+
+                'GBW': [0,-0.999],
+                'phase_margin (deg)': [0,-0.999],
+                'PSRP': [0,-0.999],
+                'PSRN': [0,-0.999],
+
+                'sr': [0,-0.999],
+                'settlingTime': [0,-0.999],
+                'reward': -11.0
+            }
+
+    reward = info['reward']
+
+    if reward >= 0:
+        reward = 10
+        done = False
+    else:
+        done = False
+
+    return new_ind_individual, observation, info, reward, done
+
+def mock_stp_simulate_individual(args):
+    env, ind, idx = args
+    
+    # ¡¾1. NaN À¹½ØÓë½âÎöÈÝ´í¡¿
+    try:
+        new_ind_list = np.array(ind).reshape(-1).astype(np.float64)
+        # Èç¹ûÉÏÒ»²½´«½øÀ´ÁË NaN£¬Á¢¿Ì±¨¾¯²¢Ç¿ÐÐÖØÖÃ£¬·ÀÖ¹´úÂë±ÀÀ£
+        if np.any(np.isnan(new_ind_list)):
+            #print(f"?? [¾¯¸æ] ·¢ÏÖ NaN ²ÎÊý£¡ÍøÂç¿ÉÄÜÒÑ¾­±ÀÀ£¡£Ç¿ÖÆÖØÖÃÎªÖÐ¼äÖµ¡£")
+            new_ind_list = (env.action_space_high + env.action_space_low) / 2.0
+    except Exception as e:
+        new_ind_list = env.action_space_low
+        #print(f"?? [¾¯¸æ] ²ÎÊý½âÎöÊ§°Ü¡£")
+
+    # ¡¾2. ¶¨ÒåÍêÃÀµÄÀíÏë²ÎÊý£ºËùÓÐ³ß´çÉèÎª¿ÉÓÃ¿Õ¼äµÄÖÐ¼äÖµ¡¿
+    target_action = (env.action_space_high + env.action_space_low) / 2.0
+    
+    # ¡¾3. ¼ÆËãÎó²î²¢ÑÏ¸ñ¹éÒ»»¯£¬¾ø¶Ô·ÀÖ¹ Loss ±¬Õ¨¡¿
+    # ¼ÆËãµ±Ç°Îó²î
+    error = np.sum((new_ind_list - target_action)**2)
+    # ¼ÆËãÀíÂÛ×î´óÎó²î£¨Èç¹ûËùÓÐ²ÎÊý¶¼ÔÚ×î»µµÄ±ß½çÉÏ£©
+    max_error = np.sum((env.action_space_high - env.action_space_low)**2)
+    
+    # ¡¾4. ÏÞÖÆ Reward ·¶Î§¡¿
+    # ÎÞÂÛ¶¯×÷¶àÀëÆ×£¬Reward ÓÀÔ¶±»ËÀËÀÏÞÖÆÔÚ [0.0, 10.0] Ö®¼ä
+    # ÀëÄ¿±êÔ½½ü£¬·ÖÊýÔ½½Ó½ü 10 ·Ö
+    reward = 1.0 * (1.0 - (error / (max_error + 1e-8)))
+    # ¶îÍâÉÏÒ»µÀ±£ÏÕ£¬ÒÔ·ÀÍòÒ»
+    reward = np.clip(reward, 0.0, 10.0)
+    
+    # ¡¾5. Î±Ôì×´Ì¬¹Û²âÖµ¡¿
+    observation = np.random.randn(22, 12).astype(np.float32)
+    
+    # ¡¾6. Î±Ôì·ûºÏ¸ñÊ½µÄ Info¡¿
+    info = {
+        'TC': [0, -0.1], 'Power': [0, -0.1], 'vos': [0, -0.1], 
+        'cmrrdc': [0, -0.1], 'dcgain': [0, -0.1], 'GBW': [0, -0.1], 
+        'phase_margin (deg)': [0, -0.1], 'PSRP': [0, -0.1], 'PSRN': [0, -0.1], 
+        'sr': [0, -0.1], 'settlingTime': [0, -0.1], 'reward': reward
+    }
+    
+    done = False
+    
+    return new_ind_list.tolist(), observation, info, float(reward), done

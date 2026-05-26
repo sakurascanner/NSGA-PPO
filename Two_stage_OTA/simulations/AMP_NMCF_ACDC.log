@@ -1,0 +1,74 @@
+
+No compatibility mode selected!
+
+
+Circuit: test opamp acdc
+
+Doing analysis at TEMP = 27.000000 and TNOM = 27.000000
+
+
+No. of Data Rows : 166
+ivdd25              =  -7.319025e-05
+vout25              =  7.211638e-01
+Doing analysis at TEMP = 27.000000 and TNOM = 27.000000
+
+Note: Starting dynamic gmin stepping
+Trying gmin =   1.0000E-03 Note: One successful gmin step
+Trying gmin =   1.0000E-04 Note: One successful gmin step
+Trying gmin =   1.0000E-05 Note: One successful gmin step
+Trying gmin =   1.0000E-06 Warning: Further gmin increment
+Trying gmin =   5.6234E-06 Note: One successful gmin step
+Trying gmin =   2.3714E-06 Note: One successful gmin step
+Trying gmin =   6.4938E-07 Warning: Further gmin increment
+Trying gmin =   1.7154E-06 Note: One successful gmin step
+Trying gmin =   1.0554E-06 Warning: Further gmin increment
+Trying gmin =   1.5193E-06 Note: One successful gmin step
+Trying gmin =   1.2663E-06 Note: One successful gmin step
+Trying gmin =   9.6358E-07 Note: One successful gmin step
+Trying gmin =   6.3960E-07 Note: One successful gmin step
+Trying gmin =   3.4589E-07 Note: One successful gmin step
+Trying gmin =   1.3756E-07 Note: One successful gmin step
+Trying gmin =   3.4499E-08 Note: One successful gmin step
+Trying gmin =   4.3331E-09 Note: One successful gmin step
+Trying gmin =   4.3331E-10 Note: One successful gmin step
+Trying gmin =   4.3331E-11 Note: One successful gmin step
+Trying gmin =   4.3331E-12 Note: One successful gmin step
+Trying gmin =   1.0000E-12 Note: One successful gmin step
+Note: Dynamic gmin stepping completed
+
+No. of Data Rows : 101
+cmrrdc              =  -4.958960e+01
+dcgain_             =  6.103827e+01
+gain_bandwidth_product_=  2.719772e+06
+phase_margin        =  8.697273e+01
+dcpsrp              =  -4.929581e+01
+dcpsrn              =  -5.999483e+01
+Doing analysis at TEMP = 27.000000 and TNOM = 27.000000
+
+Note: Starting dynamic gmin stepping
+Trying gmin =   1.0000E-03 Note: One successful gmin step
+Trying gmin =   1.0000E-04 Note: One successful gmin step
+Trying gmin =   1.0000E-05 Note: One successful gmin step
+Trying gmin =   1.0000E-06 Warning: Further gmin increment
+Trying gmin =   5.6234E-06 Note: One successful gmin step
+Trying gmin =   2.3714E-06 Note: One successful gmin step
+Trying gmin =   6.4938E-07 Warning: Further gmin increment
+Trying gmin =   1.7154E-06 Note: One successful gmin step
+Trying gmin =   1.0554E-06 Warning: Further gmin increment
+Trying gmin =   1.5193E-06 Note: One successful gmin step
+Trying gmin =   1.2663E-06 Note: One successful gmin step
+Trying gmin =   9.6358E-07 Note: One successful gmin step
+Trying gmin =   6.3960E-07 Note: One successful gmin step
+Trying gmin =   3.4589E-07 Note: One successful gmin step
+Trying gmin =   1.3756E-07 Note: One successful gmin step
+Trying gmin =   3.4499E-08 Note: One successful gmin step
+Trying gmin =   4.3331E-09 Note: One successful gmin step
+Trying gmin =   4.3331E-10 Note: One successful gmin step
+Trying gmin =   4.3331E-11 Note: One successful gmin step
+Trying gmin =   4.3331E-12 Note: One successful gmin step
+Trying gmin =   1.0000E-12 Note: One successful gmin step
+Note: Dynamic gmin stepping completed
+
+No. of Data Rows : 1
+ASCII raw file "AMP_NMCF_op"
+Note: No ".plot", ".print", or ".fourier" lines; no simulations run
